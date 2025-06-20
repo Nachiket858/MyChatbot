@@ -46,3 +46,4 @@ dist/
 
 # Pip metadata
 pip-log.txt
+.chroma_db
