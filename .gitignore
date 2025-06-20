@@ -3,7 +3,7 @@ __pycache__/
 *.py[cod]
 *.pyo
 
-# Environment
+# Virtual environments
 .env
 .venv/
 env/
@@ -14,23 +14,35 @@ venv/
 .DS_Store
 Thumbs.db
 
-# PDF output or data
-
-
 # Vector database and cache
 *.pkl
 *.faiss
 *.npy
+*.chroma/
 
-# Logs
+# Log files
 *.log
 
-# Render build artifacts
+# PDF and data files
+*.pdf
+*.csv
+*.tsv
+*.json
+
+# Render deployment files
 render.yaml
 
-# IDE-specific
+# VS Code and IDE-specific
 .vscode/
 .idea/
 
-# Python notebooks (if any)
-*.ipynb_checkpoints/
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Build & dist
+build/
+dist/
+*.egg-info/
+
+# Pip metadata
+pip-log.txt
