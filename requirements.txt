@@ -1,0 +1,7 @@
+flask
+langchain
+langchain-google-genai
+langchain-community
+sentence-transformers
+faiss-cpu
+pypdf

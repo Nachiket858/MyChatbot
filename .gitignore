@@ -1,0 +1,36 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Environment
+.env
+.venv/
+env/
+venv/
+*.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# PDF output or data
+*.pdf
+
+# Vector database and cache
+*.pkl
+*.faiss
+*.npy
+
+# Logs
+*.log
+
+# Render build artifacts
+render.yaml
+
+# IDE-specific
+.vscode/
+.idea/
+
+# Python notebooks (if any)
+*.ipynb_checkpoints/
