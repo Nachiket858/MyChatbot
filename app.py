@@ -15,12 +15,14 @@ from qdrant_client.http.models import Distance, VectorParams
 app = Flask(__name__)
 
 # ========== Configuration ==========
-# File paths (using pathlib for cross-platform compatibility)
 BASE_DIR = Path(__file__).parent.resolve()
 STATIC_DIR = BASE_DIR / 'static'
-PDF_PATH = STATIC_DIR / 'Nachiket_shinde_Resume_v6.pdf'
 
-# API configuration (for testing - move to env vars in production)
+# Case-sensitive filename matching - MUST MATCH EXACTLY
+PDF_FILENAME = "Nachiket_Shinde_Resume_v6.pdf"  # Note uppercase 'S' in Shinde
+PDF_PATH = STATIC_DIR / PDF_FILENAME
+
+# API configuration
 QDRANT_URL = "https://b6bd2243-a196-48b4-abf7-9ee70021e4f4.us-west-1-0.aws.cloud.qdrant.io:6333"
 QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.g3pa2VAIK87ueHxmKUhRf9uW1qVt_Z0I6JUpl7GqE1s"
 GOOGLE_API_KEY = "AIzaSyA3GbDc39XAxR-4fVHII3D0mf_5Ftf7ph8"
@@ -37,6 +39,22 @@ initialized = False
 vectorstore = None
 qa_chain = None
 
+def find_pdf_file():
+    """Find PDF file with case-insensitive check"""
+    if PDF_PATH.exists():
+        return PDF_PATH
+    
+    # Case-insensitive search
+    for file in STATIC_DIR.iterdir():
+        if file.name.lower() == PDF_FILENAME.lower():
+            logger.warning(f"Found case-mismatched PDF: {file.name} (expected {PDF_FILENAME})")
+            return file
+    
+    raise FileNotFoundError(
+        f"PDF file not found. Looking for: {PDF_FILENAME}\n"
+        f"Static directory contents: {[f.name for f in STATIC_DIR.iterdir()]}"
+    )
+
 def initialize_ai_components():
     global initialized, vectorstore, qa_chain
     
@@ -47,17 +65,9 @@ def initialize_ai_components():
         logger.info("Starting AI components initialization...")
         
         try:
-            # 1. Verify PDF exists
-            if not PDF_PATH.exists():
-                error_msg = (f"PDF not found at {PDF_PATH}\n"
-                            f"Current directory: {BASE_DIR}\n"
-                            f"Directory contents: {[f.name for f in BASE_DIR.iterdir()]}\n"
-                            f"Static dir exists: {STATIC_DIR.exists()}\n"
-                            f"Static contents: {[f.name for f in STATIC_DIR.iterdir()] if STATIC_DIR.exists() else 'N/A'}")
-                logger.error(error_msg)
-                raise FileNotFoundError(error_msg)
-            
-            logger.info(f"Found PDF at {PDF_PATH}")
+            # 1. Find PDF file with case-insensitive check
+            pdf_file = find_pdf_file()
+            logger.info(f"Using PDF file at: {pdf_file}")
 
             # 2. Initialize Qdrant client
             qdrant_client = QdrantClient(
@@ -69,7 +79,6 @@ def initialize_ai_components():
 
             # 3. Setup embeddings
             embedding = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-            logger.info("Embeddings model loaded")
 
             # 4. Check if collection exists
             try:
@@ -77,12 +86,12 @@ def initialize_ai_components():
                 if collection_info.points_count > 0:
                     logger.info(f"Using existing collection with {collection_info.points_count} vectors")
                 else:
-                    raise Exception("Empty collection found - will recreate")
-            except Exception as e:
-                logger.info(f"Setting up new collection: {str(e)}")
+                    raise Exception("Empty collection - will recreate")
+            except Exception:
+                logger.info("Processing PDF and creating new collection...")
                 
                 # Load and process PDF
-                loader = PyPDFLoader(str(PDF_PATH))
+                loader = PyPDFLoader(str(pdf_file))
                 docs = loader.load()
                 splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
                 split_docs = splitter.split_documents(docs)
@@ -101,7 +110,7 @@ def initialize_ai_components():
                     embeddings=embedding,
                 )
                 vectorstore.add_documents(split_docs)
-                logger.info(f"Added {len(split_docs)} documents to Qdrant")
+                logger.info(f"Added documents to Qdrant")
 
             # Initialize QA chain
             vectorstore = Qdrant(
@@ -149,7 +158,6 @@ def home():
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    """Handle chat queries against the resume"""
     try:
         user_input = request.json.get("message", "")
         if not user_input:
@@ -161,7 +169,7 @@ def chat():
             "answer": result["result"],
             "sources": [{
                 "page": doc.metadata.get("page", "N/A"),
-                "text": doc.page_content[:100] + "..."  # Show snippet
+                "text": doc.page_content[:100] + "..."
             } for doc in result["source_documents"]]
         })
         
@@ -171,7 +179,6 @@ def chat():
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Service health endpoint"""
     qdrant_status = False
     try:
         client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
@@ -180,42 +187,34 @@ def health_check():
         logger.warning(f"Qdrant check failed: {str(e)}")
     
     return jsonify({
-        "status": "healthy",
+        "status": "healthy" if initialized else "initializing",
         "services": {
             "qdrant": qdrant_status,
-            "pdf_loaded": PDF_PATH.exists(),
+            "pdf_loaded": STATIC_DIR.exists() and any(f.suffix == '.pdf' for f in STATIC_DIR.iterdir()),
             "ai_initialized": initialized
         }
     })
 
 @app.route("/debug", methods=["GET"])
 def debug_info():
-    """Debug endpoint for deployment issues"""
+    static_files = []
+    if STATIC_DIR.exists():
+        static_files = [{
+            "name": f.name,
+            "size": f.stat().st_size,
+            "is_pdf": f.suffix.lower() == '.pdf'
+        } for f in STATIC_DIR.iterdir()]
+    
     return jsonify({
         "file_system": {
             "base_dir": str(BASE_DIR),
             "static_dir": str(STATIC_DIR),
             "static_dir_exists": STATIC_DIR.exists(),
-            "pdf_exists": PDF_PATH.exists(),
-            "contents": [f.name for f in BASE_DIR.iterdir()]
-        },
-        "environment": {
-            "python_version": os.environ.get("PYTHON_VERSION", "unknown"),
-            "render": os.environ.get("RENDER", "false"),
-            "port": os.environ.get("PORT", "not set")
+            "static_files": static_files,
+            "looking_for_pdf": PDF_FILENAME
         }
     })
 
-@app.route('/static/<path:filename>')
-def serve_static(filename):
-    """Serve static files for verification"""
-    return send_from_directory(STATIC_DIR, filename)
-
-# ========== Startup ==========
 if __name__ == "__main__":
-    # Initialize immediately for local development
-    if os.environ.get("FLASK_ENV") != "production":
-        initialize_ai_components()
-    
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
