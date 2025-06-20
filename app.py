@@ -6,17 +6,19 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyPDFLoader  # ✅ updated import
 
 # Initialize Flask app
 app = Flask(__name__)
 
 # Constants
-PDF_PATH = "Nachiket_shinde_resume_v6.pdf"
+PDF_PATH = "Nachiket_Shinde_Resume_v6.pdf"
 INDEX_PATH = "portfolio_vector_index.pkl"
 
 # Load or create vector index
 def initialize_vector_index():
+    assert os.path.exists(PDF_PATH), f"❌ PDF not found: {PDF_PATH}"  # ✅ safety check
+
     if os.path.exists(INDEX_PATH):
         with open(INDEX_PATH, 'rb') as f:
             return pickle.load(f)
@@ -80,4 +82,4 @@ def health_check():
     return jsonify({"status": "up"})
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    app.run(host="0.0.0.0", port=5000)  # ✅ for Render compatibility
