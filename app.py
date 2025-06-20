@@ -1,5 +1,8 @@
 import os
-from flask import Flask, request, jsonify
+import logging
+from threading import Lock
+from pathlib import Path
+from flask import Flask, request, jsonify, send_from_directory
 from langchain_community.vectorstores import Qdrant
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import CharacterTextSplitter
@@ -8,29 +11,27 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.chains import RetrievalQA
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams
-import logging
-from threading import Lock
 
 app = Flask(__name__)
 
-# Configuration with API keys (FOR TESTING ONLY - REPLACE WITH YOUR OWN KEYS)
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PDF_PATH = os.path.join(BASE_DIR, 'static', 'Nachiket_shinde_Resume_v6.pdf')
-COLLECTION_NAME = "mychatbot"
+# ========== Configuration ==========
+# File paths (using pathlib for cross-platform compatibility)
+BASE_DIR = Path(__file__).parent.resolve()
+STATIC_DIR = BASE_DIR / 'static'
+PDF_PATH = STATIC_DIR / 'Nachiket_shinde_Resume_v6.pdf'
 
-# Qdrant Cloud Configuration
+# API configuration (for testing - move to env vars in production)
 QDRANT_URL = "https://b6bd2243-a196-48b4-abf7-9ee70021e4f4.us-west-1-0.aws.cloud.qdrant.io:6333"
 QDRANT_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.g3pa2VAIK87ueHxmKUhRf9uW1qVt_Z0I6JUpl7GqE1s"
-
-# Google Gemini Configuration
 GOOGLE_API_KEY = "AIzaSyA3GbDc39XAxR-4fVHII3D0mf_5Ftf7ph8"
 os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 
-# Initialize logging
+COLLECTION_NAME = "mychatbot"
+
+# ========== Initialization ==========
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Thread-safe initialization
 init_lock = Lock()
 initialized = False
 vectorstore = None
@@ -43,12 +44,19 @@ def initialize_ai_components():
         if initialized:
             return
             
-        logger.info("Initializing AI components for the first time...")
+        logger.info("Starting AI components initialization...")
         
         try:
             # 1. Verify PDF exists
-            if not os.path.exists(PDF_PATH):
-                raise FileNotFoundError(f"PDF not found at {PDF_PATH}")
+            if not PDF_PATH.exists():
+                error_msg = (f"PDF not found at {PDF_PATH}\n"
+                            f"Current directory: {BASE_DIR}\n"
+                            f"Directory contents: {[f.name for f in BASE_DIR.iterdir()]}\n"
+                            f"Static dir exists: {STATIC_DIR.exists()}\n"
+                            f"Static contents: {[f.name for f in STATIC_DIR.iterdir()] if STATIC_DIR.exists() else 'N/A'}")
+                logger.error(error_msg)
+                raise FileNotFoundError(error_msg)
+            
             logger.info(f"Found PDF at {PDF_PATH}")
 
             # 2. Initialize Qdrant client
@@ -59,27 +67,28 @@ def initialize_ai_components():
             )
             logger.info("Connected to Qdrant")
 
-            # 3. Check if collection exists and has data
+            # 3. Setup embeddings
+            embedding = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+            logger.info("Embeddings model loaded")
+
+            # 4. Check if collection exists
             try:
                 collection_info = qdrant_client.get_collection(COLLECTION_NAME)
                 if collection_info.points_count > 0:
-                    logger.info(f"Collection {COLLECTION_NAME} exists with {collection_info.points_count} vectors")
+                    logger.info(f"Using existing collection with {collection_info.points_count} vectors")
                 else:
-                    raise Exception("Collection exists but is empty")
+                    raise Exception("Empty collection found - will recreate")
             except Exception as e:
-                logger.info(f"Processing PDF: {str(e)}")
+                logger.info(f"Setting up new collection: {str(e)}")
                 
-                # Load and split PDF
-                loader = PyPDFLoader(PDF_PATH)
+                # Load and process PDF
+                loader = PyPDFLoader(str(PDF_PATH))
                 docs = loader.load()
                 splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
                 split_docs = splitter.split_documents(docs)
-                logger.info(f"Split into {len(split_docs)} chunks")
+                logger.info(f"Processed {len(split_docs)} document chunks")
 
-                # Create embeddings
-                embedding = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-                # Create/recreate collection
+                # Create collection
                 qdrant_client.recreate_collection(
                     collection_name=COLLECTION_NAME,
                     vectors_config=VectorParams(size=384, distance=Distance.COSINE)
@@ -95,15 +104,15 @@ def initialize_ai_components():
                 logger.info(f"Added {len(split_docs)} documents to Qdrant")
 
             # Initialize QA chain
-            llm = ChatGoogleGenerativeAI(
-                model="gemini-1.5-flash",
-                temperature=0.7
-            )
-            
             vectorstore = Qdrant(
                 client=qdrant_client,
                 collection_name=COLLECTION_NAME,
-                embeddings=HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2"),
+                embeddings=embedding,
+            )
+            
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                temperature=0.7
             )
             
             retriever = vectorstore.as_retriever()
@@ -114,28 +123,37 @@ def initialize_ai_components():
             )
             
             initialized = True
-            logger.info("Initialization complete")
+            logger.info("AI components initialized successfully")
 
         except Exception as e:
             logger.error(f"Initialization failed: {str(e)}")
             raise
 
-# Modern Flask initialization approach
+# ========== Routes ==========
 @app.before_request
-def before_first_request():
+def handle_initialization():
     if not initialized:
         initialize_ai_components()
 
+@app.route("/")
+def home():
+    return jsonify({
+        "status": "running",
+        "service": "Resume Chatbot API",
+        "endpoints": {
+            "/chat": "POST - Send chat messages",
+            "/health": "GET - Service health check",
+            "/debug": "GET - Debug information"
+        }
+    })
+
 @app.route("/chat", methods=["POST"])
 def chat():
-    """Handle chat queries"""
+    """Handle chat queries against the resume"""
     try:
-        if not initialized:
-            initialize_ai_components()
-            
         user_input = request.json.get("message", "")
         if not user_input:
-            return jsonify({"error": "No message provided"}), 400
+            return jsonify({"error": "Message is required"}), 400
             
         result = qa_chain({"query": user_input})
         
@@ -143,30 +161,61 @@ def chat():
             "answer": result["result"],
             "sources": [{
                 "page": doc.metadata.get("page", "N/A"),
-                "source": doc.metadata.get("source", "N/A")
+                "text": doc.page_content[:100] + "..."  # Show snippet
             } for doc in result["source_documents"]]
         })
         
     except Exception as e:
         logger.error(f"Chat error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Processing failed", "details": str(e)}), 500
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    """Health check endpoint"""
+    """Service health endpoint"""
+    qdrant_status = False
     try:
         client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-        qdrant_ready = client.get_collection(COLLECTION_NAME) is not None
-    except:
-        qdrant_ready = False
-        
+        qdrant_status = client.get_collection(COLLECTION_NAME) is not None
+    except Exception as e:
+        logger.warning(f"Qdrant check failed: {str(e)}")
+    
     return jsonify({
         "status": "healthy",
-        "qdrant_ready": qdrant_ready,
-        "initialized": initialized,
-        "pdf_exists": os.path.exists(PDF_PATH)
+        "services": {
+            "qdrant": qdrant_status,
+            "pdf_loaded": PDF_PATH.exists(),
+            "ai_initialized": initialized
+        }
     })
 
+@app.route("/debug", methods=["GET"])
+def debug_info():
+    """Debug endpoint for deployment issues"""
+    return jsonify({
+        "file_system": {
+            "base_dir": str(BASE_DIR),
+            "static_dir": str(STATIC_DIR),
+            "static_dir_exists": STATIC_DIR.exists(),
+            "pdf_exists": PDF_PATH.exists(),
+            "contents": [f.name for f in BASE_DIR.iterdir()]
+        },
+        "environment": {
+            "python_version": os.environ.get("PYTHON_VERSION", "unknown"),
+            "render": os.environ.get("RENDER", "false"),
+            "port": os.environ.get("PORT", "not set")
+        }
+    })
+
+@app.route('/static/<path:filename>')
+def serve_static(filename):
+    """Serve static files for verification"""
+    return send_from_directory(STATIC_DIR, filename)
+
+# ========== Startup ==========
 if __name__ == "__main__":
+    # Initialize immediately for local development
+    if os.environ.get("FLASK_ENV") != "production":
+        initialize_ai_components()
+    
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port)
