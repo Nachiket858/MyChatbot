@@ -12,7 +12,7 @@ from qdrant_client.http.models import Distance, VectorParams
 app = Flask(__name__)
 
 # Constants
-PDF_PATH = "Nachiket_shinde_resume_v6.pdf"
+PDF_PATH = "Nachiket_shinde_Resume_v6.pdf"
 COLLECTION_NAME = "mychatbot"
 
 
