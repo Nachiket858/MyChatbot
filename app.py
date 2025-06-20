@@ -17,9 +17,7 @@ app = Flask(__name__)
 # ========== Configuration ==========
 BASE_DIR = Path(__file__).parent.resolve()
 STATIC_DIR = BASE_DIR / 'static'
-
-# Case-sensitive filename matching - MUST MATCH EXACTLY
-PDF_FILENAME = "Nachiket_Shinde_Resume_v6.pdf"  # Note uppercase 'S' in Shinde
+PDF_FILENAME = "Nachiket_Shinde_Resume_v6.pdf"
 PDF_PATH = STATIC_DIR / PDF_FILENAME
 
 # API configuration
@@ -29,6 +27,7 @@ GOOGLE_API_KEY = "AIzaSyA3GbDc39XAxR-4fVHII3D0mf_5Ftf7ph8"
 os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 
 COLLECTION_NAME = "mychatbot"
+PORT = int(os.environ.get("PORT", 10000))  # Render uses port 10000
 
 # ========== Initialization ==========
 logging.basicConfig(level=logging.INFO)
@@ -38,22 +37,6 @@ init_lock = Lock()
 initialized = False
 vectorstore = None
 qa_chain = None
-
-def find_pdf_file():
-    """Find PDF file with case-insensitive check"""
-    if PDF_PATH.exists():
-        return PDF_PATH
-    
-    # Case-insensitive search
-    for file in STATIC_DIR.iterdir():
-        if file.name.lower() == PDF_FILENAME.lower():
-            logger.warning(f"Found case-mismatched PDF: {file.name} (expected {PDF_FILENAME})")
-            return file
-    
-    raise FileNotFoundError(
-        f"PDF file not found. Looking for: {PDF_FILENAME}\n"
-        f"Static directory contents: {[f.name for f in STATIC_DIR.iterdir()]}"
-    )
 
 def initialize_ai_components():
     global initialized, vectorstore, qa_chain
@@ -65,69 +48,70 @@ def initialize_ai_components():
         logger.info("Starting AI components initialization...")
         
         try:
-            # 1. Find PDF file with case-insensitive check
-            pdf_file = find_pdf_file()
-            logger.info(f"Using PDF file at: {pdf_file}")
+            # 1. Verify PDF exists
+            if not PDF_PATH.exists():
+                raise FileNotFoundError(
+                    f"PDF not found at {PDF_PATH}\n"
+                    f"Static directory contents: {[f.name for f in STATIC_DIR.iterdir()]}"
+                )
+            logger.info(f"Using PDF file at: {PDF_PATH}")
 
             # 2. Initialize Qdrant client
             qdrant_client = QdrantClient(
                 url=QDRANT_URL,
                 api_key=QDRANT_API_KEY,
-                prefer_grpc=True
+                prefer_grpc=True,
+                timeout=30  # Increased timeout for Render
             )
             logger.info("Connected to Qdrant")
 
             # 3. Setup embeddings
             embedding = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
-            # 4. Check if collection exists
+            # 4. Process documents only if collection is empty
             try:
                 collection_info = qdrant_client.get_collection(COLLECTION_NAME)
                 if collection_info.points_count > 0:
                     logger.info(f"Using existing collection with {collection_info.points_count} vectors")
                 else:
-                    raise Exception("Empty collection - will recreate")
+                    raise Exception("Collection empty - processing documents")
             except Exception:
-                logger.info("Processing PDF and creating new collection...")
+                logger.info("Processing PDF and creating embeddings...")
                 
-                # Load and process PDF
-                loader = PyPDFLoader(str(pdf_file))
+                loader = PyPDFLoader(str(PDF_PATH))
                 docs = loader.load()
                 splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
                 split_docs = splitter.split_documents(docs)
-                logger.info(f"Processed {len(split_docs)} document chunks")
-
-                # Create collection
+                
                 qdrant_client.recreate_collection(
                     collection_name=COLLECTION_NAME,
                     vectors_config=VectorParams(size=384, distance=Distance.COSINE)
                 )
-
-                # Store in Qdrant
+                
                 vectorstore = Qdrant(
                     client=qdrant_client,
                     collection_name=COLLECTION_NAME,
                     embeddings=embedding,
                 )
                 vectorstore.add_documents(split_docs)
-                logger.info(f"Added documents to Qdrant")
+                logger.info(f"Added {len(split_docs)} documents to Qdrant")
 
             # Initialize QA chain
+            llm = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                temperature=0.7,
+                timeout=60  # Increased timeout for Render
+            )
+            
             vectorstore = Qdrant(
                 client=qdrant_client,
                 collection_name=COLLECTION_NAME,
                 embeddings=embedding,
             )
             
-            llm = ChatGoogleGenerativeAI(
-                model="gemini-1.5-flash",
-                temperature=0.7
-            )
-            
-            retriever = vectorstore.as_retriever()
             qa_chain = RetrievalQA.from_chain_type(
                 llm=llm,
-                retriever=retriever,
+                retriever=vectorstore.as_retriever(),
                 return_source_documents=True,
             )
             
@@ -150,9 +134,9 @@ def home():
         "status": "running",
         "service": "Resume Chatbot API",
         "endpoints": {
-            "/chat": "POST - Send chat messages",
-            "/health": "GET - Service health check",
-            "/debug": "GET - Debug information"
+            "/chat": {"method": "POST", "description": "Send chat messages"},
+            "/health": {"method": "GET", "description": "Service health check"},
+            "/debug": {"method": "GET", "description": "Debug information"}
         }
     })
 
@@ -179,42 +163,48 @@ def chat():
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    qdrant_status = False
-    try:
-        client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
-        qdrant_status = client.get_collection(COLLECTION_NAME) is not None
-    except Exception as e:
-        logger.warning(f"Qdrant check failed: {str(e)}")
-    
-    return jsonify({
+    status = {
         "status": "healthy" if initialized else "initializing",
         "services": {
-            "qdrant": qdrant_status,
-            "pdf_loaded": STATIC_DIR.exists() and any(f.suffix == '.pdf' for f in STATIC_DIR.iterdir()),
+            "qdrant": False,
+            "pdf_loaded": PDF_PATH.exists(),
             "ai_initialized": initialized
         }
-    })
+    }
+    
+    try:
+        client = QdrantClient(
+            url=QDRANT_URL,
+            api_key=QDRANT_API_KEY,
+            timeout=10
+        )
+        status["services"]["qdrant"] = client.get_collection(COLLECTION_NAME) is not None
+    except Exception as e:
+        logger.warning(f"Qdrant health check failed: {str(e)}")
+    
+    return jsonify(status)
 
 @app.route("/debug", methods=["GET"])
 def debug_info():
-    static_files = []
-    if STATIC_DIR.exists():
-        static_files = [{
-            "name": f.name,
-            "size": f.stat().st_size,
-            "is_pdf": f.suffix.lower() == '.pdf'
-        } for f in STATIC_DIR.iterdir()]
-    
     return jsonify({
         "file_system": {
             "base_dir": str(BASE_DIR),
             "static_dir": str(STATIC_DIR),
             "static_dir_exists": STATIC_DIR.exists(),
-            "static_files": static_files,
-            "looking_for_pdf": PDF_FILENAME
+            "static_files": [f.name for f in STATIC_DIR.iterdir()],
+            "looking_for_pdf": PDF_FILENAME,
+            "pdf_exists": PDF_PATH.exists()
+        },
+        "environment": {
+            "port": PORT,
+            "python_version": os.environ.get("PYTHON_VERSION", "unknown"),
+            "render": os.environ.get("RENDER", "false")
         }
     })
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    # For Render deployment
+    from waitress import serve
+    logger.info(f"Starting server on port {PORT}")
+    initialize_ai_components()  # Initialize before serving
+    serve(app, host="0.0.0.0", port=PORT)
