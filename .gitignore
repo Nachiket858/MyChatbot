@@ -24,7 +24,7 @@ Thumbs.db
 *.log
 
 # PDF and data files
-*.pdf
+
 *.csv
 *.tsv
 *.json
