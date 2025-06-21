@@ -27,7 +27,7 @@ GOOGLE_API_KEY = "AIzaSyA3GbDc39XAxR-4fVHII3D0mf_5Ftf7ph8"
 os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 
 COLLECTION_NAME = "mychatbot"
-PORT = int(os.environ.get("PORT", 10000))  # Render uses port 10000
+PORT = int(os.environ.get("PORT", 10000))  
 
 # ========== Initialization ==========
 logging.basicConfig(level=logging.INFO)
